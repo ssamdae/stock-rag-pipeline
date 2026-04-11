@@ -1,5 +1,7 @@
 import os
 import json
+import re
+from collections import defaultdict
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
@@ -8,12 +10,12 @@ from pypdf import PdfReader
 from openai import OpenAI
 from pinecone import Pinecone
 
-# 1. 환경 변수 로드 (GitHub Secrets에서 주입됨)
+# 1. 환경 변수 및 설정
 GCP_CREDENTIALS_JSON = os.environ.get('GCP_CREDENTIALS')
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
 PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
 
-# 구글 드라이브 폴더 ID (여기를 수정하세요!)
+# ★ 구글 드라이브 폴더 ID (수정 필수)
 SOURCE_FOLDER_ID = '1XnTl0GnMRKcZZm6CoZIq5ncfm8xkRZ-V' 
 TARGET_FOLDER_ID = '1Nor--eDStNRIZRV9P7LOLrwTEsEpkW0c'
 
@@ -24,76 +26,154 @@ drive_service = build('drive', 'v3', credentials=credentials)
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index("stock-rag-db") # Pinecone 인덱스 이름 확인
+index = pc.Index("stock-rag-db")
 
-def get_pdfs_from_drive():
-    """daily_pdf 폴더에서 PDF 파일 목록 가져오기"""
-    query = f"'{SOURCE_FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    return results.get('files', [])
-
-def process_pdf(file_id, file_name):
-    """PDF 다운로드, 텍스트 추출, GPT 전처리, 벡터 DB 업로드, 파일 이동"""
-    print(f"[{file_name}] 처리 시작...")
-    
-    # 1) 파일 다운로드 & 텍스트 추출
+def extract_text_from_pdf(file_id, report_type):
+    """PDF에서 텍스트를 추출하고 특정 마커 이후의 내용만 반환"""
     request = drive_service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
-    while done is False:
+    while not done:
         status, done = downloader.next_chunk()
-    
     fh.seek(0)
+    
     reader = PdfReader(fh)
     raw_text = "".join([page.extract_text() for page in reader.pages])
-    
-    # 2) GPT-4o-mini를 활용한 텍스트 전처리 (장전 뉴스 / 장후 결과 분리)
-    prompt = f"""
-    다음은 일일 주식 시황 PDF 텍스트입니다. 
-    이 데이터를 분석하여 '장전 뉴스(이슈/테마)'와 '장후 결과(상승 종목 및 이유)'로 명확히 분리해 주세요.
-    반드시 '장전 뉴스'와 '장후 결과' 사이에 '---' 구분자를 넣어주세요.
-    
-    [원본 텍스트]
-    {raw_text[:3000]} # 토큰 제한 방지를 위해 적절히 슬라이싱
-    """
-    
-    response = openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2
-    )
-    processed_text = response.choices[0].message.content
-    
-    # 3) text-embedding-3-large 임베딩 생성 (차원: 3072)
-    embed_response = openai_client.embeddings.create(
-        input=processed_text,
-        model="text-embedding-3-large"
-    )
-    embedding_vector = embed_response.data[0].embedding
-    
-    # 4) Pinecone DB 업로드 (파일명 기반 고유 ID 부여로 중복 방지)
-    metadata = {
-        "source": file_name,
-        "text": processed_text
-    }
-    index.upsert(vectors=[(file_id, embedding_vector, metadata)])
-    print(f"[{file_name}] DB 업로드 완료.")
-    
-    # 5) 처리 완료된 파일 processed_backup 폴더로 이동
+
+    # 노이즈 제거 로직
+    if report_type == 'pre':
+        marker = "< 경제 일반 >"
+        if marker in raw_text:
+            raw_text = raw_text.split(marker)[-1]
+    elif report_type == 'post':
+        marker_suffix = "- to the DEEP ]"
+        if marker_suffix in raw_text:
+            raw_text = raw_text.split(marker_suffix)[-1]
+            
+    return raw_text.strip()
+
+def move_to_backup(file_id):
+    """처리 완료된 파일을 백업 폴더로 이동"""
     drive_service.files().update(
         fileId=file_id,
         addParents=TARGET_FOLDER_ID,
         removeParents=SOURCE_FOLDER_ID,
         fields='id, parents'
     ).execute()
-    print(f"[{file_name}] 백업 폴더로 이동 완료.\n")
 
-if __name__ == "__main__":
+def get_pdfs_from_drive():
+    query = f"'{SOURCE_FOLDER_ID}' in parents and mimeType='application/pdf' and trashed=false"
+    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
+    return results.get('files', [])
+
+def process_paired_pdfs():
+    """파일 페어링 -> JSON 구조화 -> 인과관계 Chunking -> 임베딩 및 DB 업로드"""
     files = get_pdfs_from_drive()
     if not files:
         print("새로 업로드된 시황 PDF 파일이 없습니다.")
-    else:
-        for f in files:
-            process_pdf(f['id'], f['name'])
-        print("모든 데일리 업데이트 작업이 완료되었습니다!")
+        return
+
+    # 날짜별로 파일 그룹화 (하이픈 무시, 6자리 추출)
+    paired_files = defaultdict(dict)
+    for f in files:
+        name = f['name']
+        match = re.search(r'(\d{2})-?(\d{2})-?(\d{2})', name) 
+        
+        if match:
+            date_str = match.group(1) + match.group(2) + match.group(3)
+            if 'Signal Report' in name:
+                paired_files[date_str]['pre'] = f
+            elif 'Signal Evening' in name:
+                paired_files[date_str]['post'] = f
+
+    for date_str, pair in paired_files.items():
+        if 'pre' in pair and 'post' in pair:
+            print(f"[{date_str}] 인과관계 매칭 및 JSON 구조화 시작...")
+            
+            # 1) 각각의 텍스트 추출 (노이즈 제거 적용)
+            pre_text = extract_text_from_pdf(pair['pre']['id'], 'pre')
+            post_text = extract_text_from_pdf(pair['post']['id'], 'post')
+            
+            # 2) GPT를 활용한 JSON 구조화 및 인과관계 기반 Chunking
+            prompt = f"""
+            당신은 주식 시장 데이터 엔지니어입니다.
+            제공된 '장전 뉴스'와 '장후 결과' 데이터를 바탕으로, 아침의 이슈(원인)와 오후의 결과(상승/하락)를 논리적인 인과관계(테마/섹터) 단위로 묶어 JSON 형식으로 반환하세요.
+            
+            [요구사항]
+            1. 반드시 아래 JSON 구조만 출력하세요.
+            {{
+                "date": "20{date_str[:2]}-{date_str[2:4]}-{date_str[4:]}",
+                "chunks": [
+                    {{
+                        "pre_market": "해당 테마의 장전 핵심 이슈",
+                        "post_market": "해당 테마의 오후 상승/하락 결과 및 이유"
+                    }}
+                ]
+            }}
+            2. 각 chunk의 텍스트 길이는 합쳐서 1500자 내외가 되도록 적절히 분할하세요.
+            
+            [장전 뉴스]
+            {pre_text[:3500]}
+            
+            [장후 결과]
+            {post_text[:3500]}
+            """
+            
+            # JSON 모드로 응답 받기
+            response = openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                response_format={"type": "json_object"},
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1
+            )
+            
+            # 3) JSON 파싱 및 데이터 병합
+            try:
+                result_json = json.loads(response.choices[0].message.content)
+                chunks = result_json.get("chunks", [])
+                vectors_to_upsert = []
+                
+                print(f"[{date_str}] 총 {len(chunks)}개의 인과관계 Chunk로 분할되었습니다. 임베딩 진행 중...")
+                
+                for idx, chunk in enumerate(chunks):
+                    pre_m = chunk.get("pre_market", "")
+                    post_m = chunk.get("post_market", "")
+                    
+                    # 구분자(---)를 삽입하여 최종 텍스트 병합
+                    merged_text = f"[장전 뉴스]\n{pre_m}\n\n---\n\n[장후 결과]\n{post_m}"
+                    
+                    # 4) 임베딩 생성
+                    embed_response = openai_client.embeddings.create(
+                        input=merged_text,
+                        model="text-embedding-3-large"
+                    )
+                    embedding_vector = embed_response.data[0].embedding
+                    
+                    # 5) 고유 ID 생성 (날짜 + 청크 인덱스)
+                    chunk_id = f"daily_{date_str}_chunk_{idx}"
+                    metadata = {
+                        "source": f"{date_str}_chunk_{idx}",
+                        "text": merged_text,
+                        "date": result_json.get("date")
+                    }
+                    vectors_to_upsert.append((chunk_id, embedding_vector, metadata))
+                
+                # 6) Pinecone에 일괄 업로드 (중복 덮어쓰기 방지)
+                if vectors_to_upsert:
+                    index.upsert(vectors=vectors_to_upsert)
+                    print(f"[{date_str}] Pinecone DB 업로드 완료 ({len(vectors_to_upsert)} chunks).")
+                
+                # 7) 백업 이동
+                move_to_backup(pair['pre']['id'])
+                move_to_backup(pair['post']['id'])
+                print(f"[{date_str}] 업데이트 및 백업 이동 완벽하게 종료.\n")
+                
+            except Exception as e:
+                print(f"[{date_str}] JSON 파싱 또는 업로드 중 에러 발생: {e}")
+                
+        else:
+            print(f"[{date_str}] 짝이 맞지 않아 대기 중입니다.")
+
+if __name__ == "__main__":
+    process_paired_pdfs()
