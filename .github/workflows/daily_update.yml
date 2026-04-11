@@ -1,0 +1,34 @@
+name: Daily Stock Data MLOps
+
+# 언제 실행할지 설정 (스케줄러)
+on:
+  schedule:
+    # 매일 한국 시간(KST) 오전 8시에 실행되도록 설정 (UTC 기준 23:00)
+    # 크론 표현식: 분 시 일 월 요일
+    - cron: '0 23 * * *'
+  workflow_dispatch: # 수동으로도 실행할 수 있도록 버튼 추가
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 저장소 코드 불러오기
+      uses: actions/checkout@v3
+
+    - name: Python 환경 세팅
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: 라이브러리 설치
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 파이프라인 스크립트 실행 (main.py)
+      env:
+        GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+      run: python main.py
