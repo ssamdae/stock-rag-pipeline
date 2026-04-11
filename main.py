@@ -12,8 +12,8 @@ from pinecone import Pinecone
 
 # 1. 환경 변수 및 설정
 GCP_CREDENTIALS_JSON = os.environ.get('GCP_CREDENTIALS')
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
-PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
+PINECONE_API_KEY = os.environ.get('PINECONE_API_KEY', '').strip()
 
 # ★ 구글 드라이브 폴더 ID (수정 필수)
 SOURCE_FOLDER_ID = '1XnTl0GnMRKcZZm6CoZIq5ncfm8xkRZ-V' 
