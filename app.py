@@ -166,3 +166,64 @@ with tab2:
                 ]
             )
             ans = response.choices
+
+# --- Tab 3: 백테스트 시뮬레이션 ---
+with tab3:
+    st.subheader("과거 데이터 기반 모델 성능 검증 (Backtest)")
+    st.write("과거의 '장전 뉴스'만 AI에게 보여주고, 장이 끝난 후의 '실제 결과'와 비교하여 예측 승률을 채점합니다.")
+
+    if st.button("백테스트 시뮬레이션 시작", type="primary"):
+        # 테스트용 가상의 과거 데이터 3일 치 (실제로는 DB나 CSV에서 불러옵니다)
+        historical_data = [
+            {"date": "2026-04-10", "pre_news": "<경제일반> A반도체, 엔비디아 향 HBM 공급 테스트 통과 임박... <기타>", "post_result": "A반도체 상한가 마감, 반도체 장비주 동반 상승"},
+            {"date": "2026-04-11", "pre_news": "<경제일반> B바이오, FDA 신약 승인 보류 소식에 제약 섹터 전반적 우려... C제약은 반사이익 기대 <기타>", "post_result": "B바이오 하한가, C제약은 5% 상승 마감"},
+            {"date": "2026-04-12", "pre_news": "<경제일반> D자동차, 북미 판매 호조로 역대 최대 분기 실적 달성 공시... <기타>", "post_result": "D자동차 8% 급등, 자동차 부품주 강세 주도"}
+        ]
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results = []
+        hit_count = 0
+
+        for i, data in enumerate(historical_data):
+            status_text.text(f"[{data['date']}] 과거 데이터 분석 및 예측 중... ({i+1}/{len(historical_data)})")
+            
+            # 1. 모델 예측 (과거의 장전 뉴스만 제공)
+            predictions = get_stock_predictions(data["pre_news"])
+            predicted_stocks = [p["stock"] for p in predictions]
+            
+            # 2. 적중 판별 (예측 종목이 실제 '장후 결과' 텍스트에 들어있고, 긍정적 단어와 함께 쓰였는지)
+            is_hit = False
+            for stock in predicted_stocks:
+                if stock in data["post_result"] and any(word in data["post_result"] for word in ["상승", "급등", "상한가", "강세"]):
+                    is_hit = True
+                    break # 하나라도 맞추면 그 날의 예측은 성공으로 간주
+
+            if is_hit:
+                hit_count += 1
+
+            # 3. 결과 기록
+            results.append({
+                "날짜 (Date)": data["date"],
+                "AI 추천 종목": ", ".join(predicted_stocks) if predicted_stocks else "추천 없음",
+                "실제 장후 결과": data["post_result"],
+                "적중 여부": "✅ 성공" if is_hit else "❌ 실패"
+            })
+            
+            progress_bar.progress((i + 1) / len(historical_data))
+
+        status_text.text("✨ 백테스트 시뮬레이션 완료!")
+        
+        # --- 결과 출력 화면 ---
+        st.markdown("---")
+        st.subheader("📊 백테스트 리포트")
+        win_rate = (hit_count / len(historical_data)) * 100
+        
+        # 핵심 지표 표시
+        col1, col2, col3 = st.columns(3)
+        col1.metric("테스트 기간", f"{len(historical_data)}일")
+        col2.metric("예측 적중 일수", f"{hit_count}일")
+        col3.metric("AI 모델 승률 (Hit Rate)", f"{win_rate:.1f}%")
+        
+        # 상세 내역 표
+        st.dataframe(pd.DataFrame(results), use_container_width=True)
