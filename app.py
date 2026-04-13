@@ -80,7 +80,7 @@ def get_stock_predictions(context_text):
     return json.loads(response.choices[0].message.content).get("top_picks", [])
 
 # --- [3] UI 구성 (Tabs) ---
-st.title("📈 Stock Partner AI: RAG & Signal Analysis")
+st.title("📈RAG & Signal Analysis")
 
 tab1, tab2, tab3 = st.tabs(["🚀 실시간 리포트 분석", "🤖 RAG 투자 파트너", "🧪 백테스트 시뮬레이션"])
 
