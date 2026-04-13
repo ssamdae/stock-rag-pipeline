@@ -167,63 +167,99 @@ with tab2:
             )
             ans = response.choices
 
-# --- Tab 3: 백테스트 시뮬레이션 ---
+# --- Tab 3: 실제 데이터 기반 백테스트 시뮬레이션 ---
 with tab3:
-    st.subheader("과거 데이터 기반 모델 성능 검증 (Backtest)")
-    st.write("과거의 '장전 뉴스'만 AI에게 보여주고, 장이 끝난 후의 '실제 결과'와 비교하여 예측 승률을 채점합니다.")
+    st.subheader("🧪 벡터 DB 실제 데이터 기반 모델 성능 검증 (Backtest)")
+    st.write("Pinecone DB에 저장된 과거 3년 치 데이터를 불러와 실제 모델의 승률을 채점합니다.")
 
-    if st.button("백테스트 시뮬레이션 시작", type="primary"):
-        # 테스트용 가상의 과거 데이터 3일 치 (실제로는 DB나 CSV에서 불러옵니다)
-        historical_data = [
-            {"date": "2026-04-10", "pre_news": "<경제일반> A반도체, 엔비디아 향 HBM 공급 테스트 통과 임박... <기타>", "post_result": "A반도체 상한가 마감, 반도체 장비주 동반 상승"},
-            {"date": "2026-04-11", "pre_news": "<경제일반> B바이오, FDA 신약 승인 보류 소식에 제약 섹터 전반적 우려... C제약은 반사이익 기대 <기타>", "post_result": "B바이오 하한가, C제약은 5% 상승 마감"},
-            {"date": "2026-04-12", "pre_news": "<경제일반> D자동차, 북미 판매 호조로 역대 최대 분기 실적 달성 공시... <기타>", "post_result": "D자동차 8% 급등, 자동차 부품주 강세 주도"}
-        ]
+    # 날짜 선택 UI
+    col1, col2 = st.columns(2)
+    with col1:
+        start_date = st.date_input("시작일", datetime.date(2026, 3, 1))
+    with col2:
+        end_date = st.date_input("종료일", datetime.date(2026, 3, 25))
 
+    if st.button("실제 데이터로 시뮬레이션 시작", type="primary"):
         progress_bar = st.progress(0)
         status_text = st.empty()
+        
         results = []
         hit_count = 0
-
-        for i, data in enumerate(historical_data):
-            status_text.text(f"[{data['date']}] 과거 데이터 분석 및 예측 중... ({i+1}/{len(historical_data)})")
-            
-            # 1. 모델 예측 (과거의 장전 뉴스만 제공)
-            predictions = get_stock_predictions(data["pre_news"])
-            predicted_stocks = [p["stock"] for p in predictions]
-            
-            # 2. 적중 판별 (예측 종목이 실제 '장후 결과' 텍스트에 들어있고, 긍정적 단어와 함께 쓰였는지)
-            is_hit = False
-            for stock in predicted_stocks:
-                if stock in data["post_result"] and any(word in data["post_result"] for word in ["상승", "급등", "상한가", "강세"]):
-                    is_hit = True
-                    break # 하나라도 맞추면 그 날의 예측은 성공으로 간주
-
-            if is_hit:
-                hit_count += 1
-
-            # 3. 결과 기록
-            results.append({
-                "날짜 (Date)": data["date"],
-                "AI 추천 종목": ", ".join(predicted_stocks) if predicted_stocks else "추천 없음",
-                "실제 장후 결과": data["post_result"],
-                "적중 여부": "✅ 성공" if is_hit else "❌ 실패"
-            })
-            
-            progress_bar.progress((i + 1) / len(historical_data))
-
-        status_text.text("✨ 백테스트 시뮬레이션 완료!")
+        total_days = (end_date - start_date).days + 1
         
-        # --- 결과 출력 화면 ---
+        # 날짜 리스트 생성 및 Pinecone ID 조합
+        date_list = [start_date + datetime.timedelta(days=x) for x in range(total_days)]
+        
+        for i, current_date in enumerate(date_list):
+            date_str_yymmdd = current_date.strftime("%y%m%d") # 예: 260325
+            date_str_full = current_date.strftime("%Y-%m-%d")
+            
+            # Pinecone ID 조합 (미리 구축하신 규칙 적용)
+            # 청크가 여러 개라면 chunk_0, chunk_1 등을 순회해야 하지만, 여기선 기본 chunk_0 기준
+            target_id = f"daily_{date_str_yymmdd}_chunk_0"
+            
+            status_text.text(f"[{date_str_full}] Pinecone 데이터 조회 중... ({i+1}/{total_days})")
+            
+            try:
+                # 1. Pinecone에서 해당 날짜 ID의 데이터 Fetch (직접 조회)
+                fetch_response = index.fetch(ids=[target_id])
+                
+                # 데이터가 없는 날(주말, 공휴일 등) 패스
+                if target_id not in fetch_response['vectors']:
+                    continue
+                    
+                raw_text = fetch_response['vectors'][target_id]['metadata']['text']
+                
+                # 2. [장전 뉴스]와 [장후 결과] 분리 (구축하신 '---' 구분자 활용)
+                if "---" in raw_text:
+                    parts = raw_text.split("---")
+                    pre_news = parts[0].strip()
+                    post_result = parts[1].strip()
+                else:
+                    pre_news = raw_text # 구분자가 없을 경우 전체를 장전뉴스로 가정
+                    post_result = ""
+
+                # 3. 모델 예측 (장전 뉴스만 AI에게 제공)
+                status_text.text(f"[{date_str_full}] AI 예측 중... ({i+1}/{total_days})")
+                predictions = get_stock_predictions(pre_news) # Tab 1에서 만든 함수 재사용
+                predicted_stocks = [p["stock"] for p in predictions]
+                
+                # 4. 적중 판별 (AI 예측 종목이 실제 장후 결과에 등장하고, 긍정적 단어와 매칭되는지)
+                is_hit = False
+                for stock in predicted_stocks:
+                    if stock in post_result and any(word in post_result for word in ["상승", "급등", "상한가", "강세", "돌파", "수혜"]):
+                        is_hit = True
+                        break
+
+                if is_hit:
+                    hit_count += 1
+
+                # 5. 결과 기록
+                results.append({
+                    "날짜": date_str_full,
+                    "AI 추천 종목": ", ".join(predicted_stocks) if predicted_stocks else "추천 없음",
+                    "장후 실제 결과": post_result[:100] + "..." if len(post_result) > 100 else post_result, # 너무 길면 자름
+                    "적중": "✅ 성공" if is_hit else "❌ 실패"
+                })
+                
+            except Exception as e:
+                st.warning(f"{date_str_full} 데이터 처리 중 오류: {e}")
+                
+            progress_bar.progress((i + 1) / total_days)
+
+        # --- 최종 결과 출력 ---
+        status_text.text("✨ 실제 데이터 백테스트 완료!")
         st.markdown("---")
-        st.subheader("📊 백테스트 리포트")
-        win_rate = (hit_count / len(historical_data)) * 100
         
-        # 핵심 지표 표시
-        col1, col2, col3 = st.columns(3)
-        col1.metric("테스트 기간", f"{len(historical_data)}일")
-        col2.metric("예측 적중 일수", f"{hit_count}일")
-        col3.metric("AI 모델 승률 (Hit Rate)", f"{win_rate:.1f}%")
-        
-        # 상세 내역 표
-        st.dataframe(pd.DataFrame(results), use_container_width=True)
+        valid_days = len(results)
+        if valid_days > 0:
+            win_rate = (hit_count / valid_days) * 100
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("테스트 진행 일수", f"{valid_days}일 (휴장일 제외)")
+            col2.metric("예측 적중 일수", f"{hit_count}일")
+            col3.metric("실제 데이터 승률", f"{win_rate:.1f}%")
+            
+            st.dataframe(pd.DataFrame(results), use_container_width=True)
+        else:
+            st.error("선택한 기간에 해당하는 Pinecone 데이터가 없습니다.")
