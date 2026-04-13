@@ -4,6 +4,8 @@ import json
 import io
 import re
 import fitz  # PyMuPDF
+import datetime
+
 from openai import OpenAI
 from pinecone import Pinecone
 from google.oauth2 import service_account
