@@ -58,7 +58,7 @@ def get_top_10_predictions(pre_market_text):
     return json.loads(response.choices[0].message.content).get("top_picks", [])
 
 # --- [3] UI 구성 ---
-st.title("📈 주식 파트너 RAG 시스템 & 시뮬레이터")
+st.title("📈 RAG 시스템 & 시뮬레이터")
 
 tab1, tab2 = st.tabs(["🚀 실시간 장전 분석", "🧪 모델 성능 시뮬레이션"])
 
