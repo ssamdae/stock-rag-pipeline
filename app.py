@@ -88,6 +88,58 @@ st.title("📈RAG & Signal Analysis")
 
 tab1, tab2, tab3 = st.tabs(["🚀 실시간 리포트 분석", "🤖 RAG 투자 파트너", "🧪 백테스트 시뮬레이션"])
 
+# ------- 사이드 바 -----------
+st.subheader("🗄️ Pinecone DB 데이터 적재 현황 스캐너")
+st.write("지정한 기간 내에 DB에 데이터가 빠짐없이 들어있는지 점검합니다.")
+
+col1, col2 = st.columns(2)
+with col1:
+    check_start = st.date_input("점검 시작일", datetime.date(2026, 3, 1), key="chk_start")
+with col2:
+    check_end = st.date_input("점검 종료일", datetime.date(2026, 3, 31), key="chk_end")
+
+if st.button("DB 상태 스캔하기"):
+    scan_results = []
+    total_days = (check_end - check_start).days + 1
+    date_list = [check_start + datetime.timedelta(days=x) for x in range(total_days)]
+    
+    scan_bar = st.progress(0)
+    
+    for i, current_date in enumerate(date_list):
+        date_str_yymmdd = current_date.strftime("%y%m%d")
+        date_str_full = current_date.strftime("%Y-%m-%d")
+        
+        # 대표님의 명명 규칙인 ID 생성
+        target_id = f"daily_{date_str_yymmdd}_chunk_0"
+        
+        try:
+            # 해당 ID로 Pinecone DB 찔러보기
+            fetch_response = index.fetch(ids=[target_id])
+            
+            if target_id in fetch_response['vectors']:
+                status = "🟢 데이터 있음"
+                # (옵션) 텍스트가 몇 글자인지 길이도 확인
+                text_len = len(fetch_response['vectors'][target_id]['metadata']['text'])
+            else:
+                status = "🔴 없음 (휴장일 또는 누락)"
+                text_len = 0
+                
+            scan_results.append({
+                "날짜": date_str_full,
+                "Pinecone ID": target_id,
+                "상태": status,
+                "텍스트 길이": f"{text_len} 자" if text_len > 0 else "-"
+            })
+            
+        except Exception as e:
+            st.error(f"스캔 중 오류: {e}")
+            
+        scan_bar.progress((i + 1) / total_days)
+        
+    st.success("스캔 완료!")
+    st.dataframe(pd.DataFrame(scan_results), use_container_width=True)
+
+
 # --- Tab 1: 실시간 리포트 분석 (구글 드라이브 연동) ---
 with tab1:
     st.subheader("오늘의 Signal Report 정밀 분석")
