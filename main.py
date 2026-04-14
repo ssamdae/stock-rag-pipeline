@@ -6,7 +6,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 import io
-from pypdf import PdfReader
+import fitz  # pypdf 대신 PyMuPDF 사용
 from openai import OpenAI
 from pinecone import Pinecone
 
@@ -29,29 +29,54 @@ pc = Pinecone(api_key=PINECONE_API_KEY)
 index = pc.Index("stock-rag-db")
 
 def extract_text_from_pdf(file_id, report_type):
-    """PDF에서 텍스트를 추출하고 특정 마커 이후의 내용만 반환"""
+    """PDF에서 텍스트를 추출하고 특정 마커 이후의 내용만 반환 (PyMuPDF 사용)"""
     request = drive_service.files().get_media(fileId=file_id)
     fh = io.BytesIO()
     downloader = MediaIoBaseDownload(fh, request)
     done = False
     while not done:
         status, done = downloader.next_chunk()
-    fh.seek(0)
     
-    reader = PdfReader(fh)
-    raw_text = "".join([page.extract_text() for page in reader.pages])
-
-    # 노이즈 제거 로직
+    # BytesIO 스트림에서 바이트 데이터를 가져와 PyMuPDF로 문서 열기
+    doc = fitz.open(stream=fh.getvalue(), filetype="pdf")
+    
     if report_type == 'pre':
-        marker = "< 경제 일반 >"
-        if marker in raw_text:
-            raw_text = raw_text.split(marker)[-1]
+        # [장전 뉴스] 정밀 파싱: < 경제 일반 > ~ < 기타 > 사이 추출
+        is_target_section = False
+        extracted_lines = []
+        
+        for page in doc:
+            blocks = page.get_text("dict").get("blocks", [])
+            for b in blocks:
+                if "lines" not in b: continue
+                for l in b["lines"]:
+                    line_text = "".join([s["text"] for s in l["spans"]]).strip()
+                    if not line_text: continue
+                    
+                    clean_line = line_text.replace(" ", "")
+                    
+                    if "<경제일반>" in clean_line:
+                        is_target_section = True
+                        
+                    if "<기타>" in clean_line and is_target_section:
+                        return "\n".join(extracted_lines).strip()
+                        
+                    if is_target_section:
+                        extracted_lines.append(line_text)
+                        
+        return "\n".join(extracted_lines).strip() if extracted_lines else ""
+        
     elif report_type == 'post':
+        # [장후 결과] 파싱: 텍스트 전체를 읽어 마커 이후만 추출
+        raw_text = ""
+        for page in doc:
+            raw_text += page.get_text() + "\n"
+            
         marker_suffix = "- to the DEEP ]"
         if marker_suffix in raw_text:
             raw_text = raw_text.split(marker_suffix)[-1]
             
-    return raw_text.strip()
+        return raw_text.strip()
 
 def move_to_backup(file_id):
     """처리 완료된 파일을 백업 폴더로 이동"""
