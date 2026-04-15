@@ -123,13 +123,15 @@ def process_paired_pdfs():
     paired_files = defaultdict(dict)
     for f in files:
         name = f['name']
+        name_lower = name.lower()  # 파일명을 전부 소문자로 임시 변환
         match = re.search(r'(\d{2})-?(\d{2})-?(\d{2})', name) 
         
         if match:
             date_str = match.group(1) + match.group(2) + match.group(3)
-            if 'Signal Report' in name:
+            # 비교할 때도 모두 소문자로 찾습니다.
+            if 'signal report' in name_lower:
                 paired_files[date_str]['pre'] = f
-            elif 'Signal Evening' in name:
+            elif 'signal evening' in name_lower:
                 paired_files[date_str]['post'] = f
 
     for date_str, pair in paired_files.items():
